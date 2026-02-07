@@ -13,14 +13,6 @@ Smart home CLIs and utilities for Dex (AI assistant).
 | [cam/](cam/) | DJI Osmo Pocket 3 capture via Windows PC |
 | [stremio/](stremio/) | Stremio control on Nebula via ADB |
 
-## Skills
-
-Reusable AI agent skills in [skills/](skills/):
-
-| Skill | Description |
-|-------|-------------|
-| [frontend-design](skills/frontend-design/) | Distinctive, production-grade UI design |
-
 ## Install
 
 ```bash
@@ -32,10 +24,8 @@ cd dex-tools
 ln -s $(pwd)/lights/dex-lights /usr/local/bin/
 ln -s $(pwd)/cast/dex-cast /usr/local/bin/
 ln -s $(pwd)/adb/dex-adb /usr/local/bin/
+ln -s $(pwd)/voice/dex_tts.py /usr/local/bin/dex-tts
 # etc.
-
-# Symlink skills to OpenClaw
-ln -s $(pwd)/skills/* ~/.openclaw/skills/
 ```
 
 ## Usage
@@ -55,7 +45,7 @@ dex-adb screenshot
 dex-adb shell pm list packages
 
 # Voice
-python voice/dex_tts.py "Hello world"
+dex-tts "Hello world"
 ```
 
 ## Requirements
@@ -64,7 +54,3 @@ python voice/dex_tts.py "Hello world"
 - Python 3.10+ (for voice)
 - ADB (for adb, stremio tools)
 - Network access to devices
-
-## License
-
-Tools are provided as-is. Skills may have individual licenses (see each skill folder).
