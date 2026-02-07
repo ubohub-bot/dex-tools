@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""
+dex-stremio - Control Stremio on Nebula projector
+
+Usage:
+  dex-stremio search <query>           Search for movies/shows (TMDB)
+  dex-stremio play <imdb_id>           Play movie by IMDB ID
+  dex-stremio play <imdb_id> S01E01    Play TV episode
+  dex-stremio open                     Just open Stremio app
+  dex-stremio pause                    Pause playback
+  dex-stremio resume                   Resume playback
+  dex-stremio stop                     Stop and go home
+  dex-stremio back                     Go back
+"""
+
+import sys
+import subprocess
+import argparse
+import json
+import urllib.request
+import urllib.parse
+import os
+
+# Nebula ADB config
+NEBULA_IP = "192.168.0.248"
+NEBULA_PORT = "5555"
+NEBULA_ADB = f"{NEBULA_IP}:{NEBULA_PORT}"
+
+# TMDB API (free, no key needed for basic search via OMDB alternative)
+OMDB_API_KEY = "trilogy"  # Public demo key, limited
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
+
+# Stremio package
+STREMIO_PACKAGE = "com.stremio.one"
+
+
+def run_adb(args):
+    """Run ADB command on Nebula"""
+    cmd = ["adb", "-s", NEBULA_ADB] + args
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    return result
+
+
+def ensure_connected():
+    """Ensure Nebula is connected"""
+    result = subprocess.run(["adb", "devices"], capture_output=True, text=True)
+    if NEBULA_ADB not in result.stdout or "unauthorized" in result.stdout:
+        subprocess.run(["adb", "connect", NEBULA_ADB], capture_output=True)
+
+
+def search_tmdb(query, content_type="multi"):
+    """Search TMDB for movies/shows"""
+    if not TMDB_API_KEY:
+        return search_omdb(query)
+    
+    encoded = urllib.parse.quote(query)
+    url = f"https://api.themoviedb.org/3/search/{content_type}?api_key={TMDB_API_KEY}&query={encoded}"
+    
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            results = []
+            for item in data.get("results", [])[:10]:
+                media_type = item.get("media_type", content_type)
+                if media_type == "person":
+                    continue
+                    
+                result = {
+                    "title": item.get("title") or item.get("name"),
+                    "year": (item.get("release_date") or item.get("first_air_date") or "")[:4],
+                    "type": "movie" if media_type == "movie" else "series",
+                    "tmdb_id": item.get("id"),
+                }
+                results.append(result)
+            return results
+    except Exception as e:
+        print(f"TMDB error: {e}")
+        return []
+
+
+def search_omdb(query):
+    """Fallback search via OMDB"""
+    encoded = urllib.parse.quote(query)
+    url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&s={encoded}"
+    
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            results = []
+            for item in data.get("Search", [])[:10]:
+                results.append({
+                    "title": item.get("Title"),
+                    "year": item.get("Year"),
+                    "type": "movie" if item.get("Type") == "movie" else "series",
+                    "imdb_id": item.get("imdbID"),
+                })
+            return results
+    except Exception as e:
+        print(f"OMDB error: {e}")
+        return []
+
+
+def get_imdb_id(tmdb_id, media_type="movie"):
+    """Get IMDB ID from TMDB ID"""
+    if not TMDB_API_KEY:
+        return None
+    
+    url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids?api_key={TMDB_API_KEY}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("imdb_id")
+    except:
+        return None
+
+
+def open_stremio():
+    """Open Stremio app"""
+    ensure_connected()
+    result = run_adb(["shell", "monkey", "-p", STREMIO_PACKAGE, 
+                      "-c", "android.intent.category.LAUNCHER", "1"])
+    return result.returncode == 0
+
+
+def play_content(imdb_id, season=None, episode=None):
+    """Play content in Stremio via deep link"""
+    ensure_connected()
+    
+    if season and episode:
+        # TV episode: stremio:///detail/series/{id}/{id}:{season}:{episode}
+        uri = f"stremio:///detail/series/{imdb_id}/{imdb_id}:{season}:{episode}"
+    else:
+        # Movie: stremio:///detail/movie/{id}/{id}
+        uri = f"stremio:///detail/movie/{imdb_id}/{imdb_id}"
+    
+    # Force-stop Stremio first for reliable deep link handling
+    run_adb(["shell", "am", "force-stop", STREMIO_PACKAGE])
+    import time
+    time.sleep(1)
+    
+    # Open deep link
+    result = run_adb(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", uri])
+    
+    return result.returncode == 0
+
+
+def send_keyevent(keycode):
+    """Send keyevent to Nebula"""
+    ensure_connected()
+    result = run_adb(["shell", "input", "keyevent", keycode])
+    return result.returncode == 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Control Stremio on Nebula")
+    parser.add_argument("command", help="Command: search, play, open, pause, resume, stop, back")
+    parser.add_argument("args", nargs="*", help="Command arguments")
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    
+    args = parser.parse_args()
+    cmd = args.command.lower()
+    
+    # Search
+    if cmd == "search":
+        if not args.args:
+            print("Usage: dex-stremio search <query>")
+            sys.exit(1)
+        
+        query = " ".join(args.args)
+        print(f"Searching for '{query}'...")
+        results = search_omdb(query)  # Use OMDB by default (no key needed)
+        
+        if args.json:
+            print(json.dumps(results, indent=2))
+        else:
+            if not results:
+                print("No results found")
+            else:
+                for i, r in enumerate(results, 1):
+                    imdb = r.get("imdb_id", "")
+                    print(f"{i}. {r['title']} ({r['year']}) [{r['type']}] {imdb}")
+    
+    # Play
+    elif cmd == "play":
+        if not args.args:
+            print("Usage: dex-stremio play <imdb_id> [S01E01]")
+            sys.exit(1)
+        
+        imdb_id = args.args[0]
+        season, episode = None, None
+        
+        # Parse episode if provided
+        if len(args.args) > 1:
+            ep_str = args.args[1].upper()
+            if "S" in ep_str and "E" in ep_str:
+                import re
+                match = re.match(r"S(\d+)E(\d+)", ep_str)
+                if match:
+                    season, episode = match.groups()
+        
+        if season and episode:
+            print(f"Playing {imdb_id} S{season}E{episode}...")
+        else:
+            print(f"Playing {imdb_id}...")
+        
+        if play_content(imdb_id, season, episode):
+            print("Playback started")
+        else:
+            print("Failed to start playback")
+            sys.exit(1)
+    
+    # Open app
+    elif cmd == "open":
+        if open_stremio():
+            print("Stremio opened")
+        else:
+            print("Failed to open Stremio")
+            sys.exit(1)
+    
+    # Playback controls
+    elif cmd == "pause" or cmd == "playpause":
+        send_keyevent("KEYCODE_MEDIA_PLAY_PAUSE")
+        print("Play/Pause sent")
+    
+    elif cmd == "resume" or cmd == "play" and not args.args:
+        send_keyevent("KEYCODE_MEDIA_PLAY")
+        print("Play sent")
+    
+    elif cmd == "stop":
+        send_keyevent("KEYCODE_MEDIA_STOP")
+        print("Stop sent")
+    
+    elif cmd == "back":
+        send_keyevent("KEYCODE_BACK")
+        print("Back sent")
+    
+    elif cmd == "home":
+        send_keyevent("KEYCODE_HOME")
+        print("Home sent")
+    
+    elif cmd == "select" or cmd == "ok":
+        send_keyevent("KEYCODE_DPAD_CENTER")
+        print("Select sent")
+    
+    elif cmd in ["up", "down", "left", "right"]:
+        send_keyevent(f"KEYCODE_DPAD_{cmd.upper()}")
+        print(f"{cmd.capitalize()} sent")
+    
+    else:
+        print(f"Unknown command: {cmd}")
+        print("Commands: search, play, open, pause, resume, stop, back, home, up/down/left/right")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

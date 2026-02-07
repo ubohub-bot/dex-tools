@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+dex-cast - Cast media to Nebula projector (Chromecast)
+
+Usage:
+  dex-cast <url>              Cast YouTube/media URL
+  dex-cast stop               Stop playback
+  dex-cast pause              Pause playback
+  dex-cast play               Resume playback
+  dex-cast volume <0-100>     Set volume
+  dex-cast status             Show current playback status
+  dex-cast info               Show device info
+"""
+
+import sys
+import subprocess
+import argparse
+import json
+import shutil
+
+# Nebula projector config
+NEBULA_IP = "192.168.0.248"
+NEBULA_NAME = "D2426"
+
+
+def run_catt(args, capture=True):
+    """Run catt command"""
+    cmd = ["catt", "-d", NEBULA_IP] + args
+    if capture:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return result
+    else:
+        # Stream output for cast command
+        return subprocess.run(cmd, timeout=300)
+
+
+def check_catt():
+    """Check if catt is installed"""
+    if not shutil.which("catt"):
+        print("❌ catt not installed. Run: pip install catt")
+        sys.exit(1)
+
+
+def cast_url(url):
+    """Cast a URL to the projector"""
+    print(f"📺 Casting to Nebula...", flush=True)
+    result = run_catt(["cast", url], capture=False)
+    return result.returncode == 0
+
+
+def stop():
+    """Stop playback"""
+    result = run_catt(["stop"])
+    if result.returncode == 0:
+        print("⏹️  Stopped")
+        return True
+    print(f"❌ Failed: {result.stderr}")
+    return False
+
+
+def pause():
+    """Pause playback"""
+    result = run_catt(["pause"])
+    if result.returncode == 0:
+        print("⏸️  Paused")
+        return True
+    print(f"❌ Failed: {result.stderr}")
+    return False
+
+
+def play():
+    """Resume playback"""
+    result = run_catt(["play"])
+    if result.returncode == 0:
+        print("▶️  Playing")
+        return True
+    print(f"❌ Failed: {result.stderr}")
+    return False
+
+
+def set_volume(level):
+    """Set volume (0-100)"""
+    level = max(0, min(100, int(level)))
+    result = run_catt(["volume", str(level)])
+    if result.returncode == 0:
+        print(f"🔊 Volume: {level}%")
+        return True
+    print(f"❌ Failed: {result.stderr}")
+    return False
+
+
+def get_status(as_json=False):
+    """Get playback status"""
+    result = run_catt(["status"])
+    
+    if result.returncode != 0:
+        if as_json:
+            print(json.dumps({"connected": False, "error": result.stderr.strip()}))
+        else:
+            print(f"❌ Can't reach Nebula: {result.stderr.strip()}")
+        return False
+    
+    output = result.stdout.strip()
+    
+    if as_json:
+        # Parse status into JSON
+        status = {"connected": True, "raw": output}
+        for line in output.split('\n'):
+            if ':' in line:
+                key, val = line.split(':', 1)
+                status[key.strip().lower().replace(' ', '_')] = val.strip()
+        print(json.dumps(status, indent=2))
+    else:
+        print(f"📺 Nebula Status:")
+        if output:
+            for line in output.split('\n'):
+                print(f"   {line}")
+        else:
+            print("   Idle (nothing playing)")
+    
+    return True
+
+
+def get_info(as_json=False):
+    """Get device info"""
+    result = run_catt(["info"])
+    
+    if result.returncode != 0:
+        if as_json:
+            print(json.dumps({"connected": False, "error": result.stderr.strip()}))
+        else:
+            print(f"❌ Can't reach Nebula: {result.stderr.strip()}")
+        return False
+    
+    output = result.stdout.strip()
+    
+    if as_json:
+        info = {"connected": True, "ip": NEBULA_IP, "raw": output}
+        for line in output.split('\n'):
+            if ':' in line:
+                key, val = line.split(':', 1)
+                info[key.strip().lower().replace(' ', '_')] = val.strip()
+        print(json.dumps(info, indent=2))
+    else:
+        print(f"📺 Nebula Info:")
+        print(f"   IP: {NEBULA_IP}")
+        for line in output.split('\n'):
+            print(f"   {line}")
+    
+    return True
+
+
+def main():
+    check_catt()
+    
+    parser = argparse.ArgumentParser(
+        description="Cast media to Nebula projector",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    
+    parser.add_argument("command", nargs="?", help="URL to cast, or command (stop/pause/play/volume/status/info)")
+    parser.add_argument("arg", nargs="?", help="Argument for command (e.g., volume level)")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+    
+    cmd = args.command.lower()
+    
+    # Commands
+    if cmd == "stop":
+        sys.exit(0 if stop() else 1)
+    
+    elif cmd == "pause":
+        sys.exit(0 if pause() else 1)
+    
+    elif cmd == "play":
+        sys.exit(0 if play() else 1)
+    
+    elif cmd == "volume" or cmd == "vol":
+        if not args.arg:
+            print("❌ Usage: dex-cast volume <0-100>")
+            sys.exit(1)
+        try:
+            level = int(args.arg)
+            sys.exit(0 if set_volume(level) else 1)
+        except ValueError:
+            print("❌ Volume must be a number 0-100")
+            sys.exit(1)
+    
+    elif cmd == "status":
+        sys.exit(0 if get_status(args.json) else 1)
+    
+    elif cmd == "info":
+        sys.exit(0 if get_info(args.json) else 1)
+    
+    # URL - cast it
+    elif cmd.startswith("http") or "youtube.com" in cmd or "youtu.be" in cmd:
+        success = cast_url(args.command)
+        sys.exit(0 if success else 1)
+    
+    else:
+        print(f"❌ Unknown command: {cmd}")
+        print("Run 'dex-cast' without args for help")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

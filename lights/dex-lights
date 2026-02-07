@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""
+dex-lights - WLED LED strip control CLI
+
+Usage:
+  dex-lights on|off           Turn lights on/off
+  dex-lights <color>          Set color (red, green, blue, warm, cool, purple, cyan, orange, pink, white)
+  dex-lights #RRGGBB          Set hex color
+  dex-lights rgb R G B        Set RGB values (0-255)
+  dex-lights bri <0-255>      Set brightness
+  dex-lights party            Party mode effect
+  dex-lights rainbow          Rainbow effect
+  dex-lights chill            Slow color fade
+  dex-lights fx <id>          Set effect by ID (0-117)
+  dex-lights status           Show current state
+"""
+
+import sys
+import json
+import urllib.request
+import urllib.error
+
+WLED_IP = "192.168.0.176"
+WLED_URL = f"http://{WLED_IP}/json"
+
+# Named colors
+COLORS = {
+    "red": [255, 0, 0],
+    "green": [0, 255, 0],
+    "blue": [0, 0, 255],
+    "white": [255, 255, 255],
+    "warm": [255, 180, 100],
+    "cool": [200, 220, 255],
+    "purple": [128, 0, 255],
+    "cyan": [0, 255, 255],
+    "orange": [255, 100, 0],
+    "pink": [255, 50, 150],
+    "yellow": [255, 255, 0],
+}
+
+# Effect presets
+EFFECTS = {
+    "party": {"fx": 55, "sx": 180, "ix": 200},  # Colorful
+    "rainbow": {"fx": 9, "sx": 128, "ix": 128},  # Rainbow
+    "chill": {"fx": 8, "sx": 30, "ix": 128},     # Slow color wipe
+    "fire": {"fx": 66, "sx": 128, "ix": 128},    # Fire 2012
+    "ocean": {"fx": 8, "sx": 50, "ix": 200},     # Ocean-like
+    "pulse": {"fx": 2, "sx": 100, "ix": 128},    # Breathe
+    "solid": {"fx": 0},                           # Solid (no effect)
+}
+
+
+def wled_request(endpoint="", data=None):
+    """Make request to WLED API"""
+    url = f"{WLED_URL}{endpoint}"
+    try:
+        if data:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(data).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+        else:
+            req = urllib.request.Request(url)
+        
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.URLError as e:
+        print(f"❌ Can't reach WLED at {WLED_IP}: {e.reason}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
+
+
+def set_state(state_dict):
+    """Set WLED state"""
+    result = wled_request("/state", state_dict)
+    return result
+
+
+def get_status():
+    """Get current WLED status"""
+    state = wled_request("/state")
+    info = wled_request("/info")
+    return state, info
+
+
+def parse_hex_color(hex_str):
+    """Parse #RRGGBB or RRGGBB to [R, G, B]"""
+    hex_str = hex_str.lstrip("#")
+    if len(hex_str) != 6:
+        return None
+    try:
+        r = int(hex_str[0:2], 16)
+        g = int(hex_str[2:4], 16)
+        b = int(hex_str[4:6], 16)
+        return [r, g, b]
+    except ValueError:
+        return None
+
+
+def main():
+    args = sys.argv[1:]
+    
+    if not args:
+        print(__doc__)
+        sys.exit(0)
+    
+    cmd = args[0].lower()
+    
+    # On/Off
+    if cmd == "on":
+        set_state({"on": True})
+        print("💡 Lights on")
+    
+    elif cmd == "off":
+        set_state({"on": False})
+        print("🌙 Lights off")
+    
+    # Status
+    elif cmd == "status":
+        state, info = get_status()
+        on_off = "ON" if state.get("on") else "OFF"
+        bri = state.get("bri", 0)
+        fx = state.get("seg", [{}])[0].get("fx", 0)
+        print(f"💡 WLED Status: {on_off}")
+        print(f"   Brightness: {bri}/255 ({int(bri/255*100)}%)")
+        print(f"   Effect: {fx}")
+        print(f"   Name: {info.get('name', 'Unknown')}")
+        print(f"   IP: {WLED_IP}")
+    
+    # Brightness
+    elif cmd == "bri" and len(args) > 1:
+        try:
+            bri = int(args[1])
+            bri = max(0, min(255, bri))
+            set_state({"on": True, "bri": bri})
+            print(f"💡 Brightness: {bri}/255 ({int(bri/255*100)}%)")
+        except ValueError:
+            print("❌ Brightness must be 0-255")
+            sys.exit(1)
+    
+    # RGB command
+    elif cmd == "rgb" and len(args) >= 4:
+        try:
+            r, g, b = int(args[1]), int(args[2]), int(args[3])
+            color = [max(0, min(255, c)) for c in [r, g, b]]
+            set_state({"on": True, "seg": [{"col": [color], "fx": 0}]})
+            print(f"🎨 Color: RGB({color[0]}, {color[1]}, {color[2]})")
+        except ValueError:
+            print("❌ RGB values must be 0-255")
+            sys.exit(1)
+    
+    # Effect presets
+    elif cmd in EFFECTS:
+        effect = EFFECTS[cmd]
+        state = {"on": True, "bri": 255, "seg": [effect]}
+        set_state(state)
+        print(f"✨ Effect: {cmd}")
+    
+    # Custom effect by ID
+    elif cmd == "fx" and len(args) > 1:
+        try:
+            fx_id = int(args[1])
+            set_state({"on": True, "seg": [{"fx": fx_id, "sx": 128, "ix": 128}]})
+            print(f"✨ Effect ID: {fx_id}")
+        except ValueError:
+            print("❌ Effect ID must be a number")
+            sys.exit(1)
+    
+    # Named colors
+    elif cmd in COLORS:
+        color = COLORS[cmd]
+        set_state({"on": True, "seg": [{"col": [color], "fx": 0}]})
+        print(f"🎨 Color: {cmd}")
+    
+    # Hex color
+    elif cmd.startswith("#") or (len(cmd) == 6 and all(c in "0123456789abcdefABCDEF" for c in cmd)):
+        color = parse_hex_color(cmd)
+        if color:
+            set_state({"on": True, "seg": [{"col": [color], "fx": 0}]})
+            print(f"🎨 Color: #{cmd.lstrip('#').upper()}")
+        else:
+            print(f"❌ Invalid hex color: {cmd}")
+            sys.exit(1)
+    
+    else:
+        print(f"❌ Unknown command: {cmd}")
+        print("Run 'dex-lights' without args for help")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

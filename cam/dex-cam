@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+dex-cam - Capture from DJI Osmo Pocket 3 via Windows PC
+
+Usage:
+  dex-cam                     Capture 1080p, save to /tmp/
+  dex-cam --4k                Capture 4K resolution
+  dex-cam -o FILE             Save to specific path
+  dex-cam --show              Open image after capture (macOS)
+  dex-cam --json              Output JSON with path info
+  dex-cam status              Check if Osmo is connected
+"""
+
+import sys
+import os
+import subprocess
+import argparse
+import json
+from datetime import datetime
+
+# Windows PC config (via Tailscale)
+WINDOWS_HOST = "100.96.244.31"
+WINDOWS_USER = "Zeu"
+WINDOWS_REMOTE_PATH = r"C:\Users\Zeu\osmo_capture.jpg"
+CAMERA_NAME = "OsmoPocket3"
+
+# Resolution presets
+RESOLUTIONS = {
+    "720p": "1280x720",
+    "1080p": "1920x1080",
+    "4k": "3840x2160",
+}
+
+
+def ssh_cmd(cmd):
+    """Run command on Windows PC via SSH"""
+    full_cmd = ["ssh", f"{WINDOWS_USER}@{WINDOWS_HOST}", cmd]
+    result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=30)
+    return result
+
+
+def capture(resolution="1080p", output_path=None):
+    """Capture frame from Osmo"""
+    res = RESOLUTIONS.get(resolution, RESOLUTIONS["1080p"])
+    
+    # Build ffmpeg command for Windows
+    ffmpeg_cmd = (
+        f'ffmpeg -f dshow -video_size {res} -vcodec mjpeg '
+        f'-i video="{CAMERA_NAME}" -frames:v 1 -update 1 -y '
+        f'"{WINDOWS_REMOTE_PATH}" 2>&1'
+    )
+    
+    # Capture on Windows
+    result = ssh_cmd(ffmpeg_cmd)
+    
+    if result.returncode != 0:
+        # Check for common errors
+        if "Could not find" in result.stdout or "not found" in result.stderr:
+            return None, "Camera not connected (check USB mode on Osmo)"
+        return None, f"Capture failed: {result.stderr or result.stdout}"
+    
+    # Determine output path
+    if output_path is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"/tmp/osmo_{timestamp}.jpg"
+    
+    # SCP file back to Mac
+    scp_cmd = [
+        "scp", "-q",
+        f"{WINDOWS_USER}@{WINDOWS_HOST}:{WINDOWS_REMOTE_PATH.replace(chr(92), '/')}",
+        output_path
+    ]
+    
+    result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+    
+    if result.returncode != 0:
+        return None, f"Transfer failed: {result.stderr}"
+    
+    return output_path, None
+
+
+def check_status():
+    """Check if Osmo is connected"""
+    # List DirectShow devices
+    cmd = 'ffmpeg -list_devices true -f dshow -i dummy 2>&1'
+    result = ssh_cmd(cmd)
+    
+    output = result.stdout + result.stderr
+    connected = CAMERA_NAME in output
+    
+    return {
+        "connected": connected,
+        "camera": CAMERA_NAME,
+        "host": WINDOWS_HOST,
+        "devices": [line.strip() for line in output.split('\n') 
+                   if '"' in line and 'video' in line.lower()]
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Capture from DJI Osmo Pocket 3",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    
+    parser.add_argument("command", nargs="?", default="capture",
+                       help="Command: capture (default) or status")
+    parser.add_argument("-o", "--output", help="Output file path")
+    parser.add_argument("--4k", dest="four_k", action="store_true",
+                       help="Capture at 4K resolution")
+    parser.add_argument("--720p", dest="seven_twenty", action="store_true",
+                       help="Capture at 720p resolution")
+    parser.add_argument("--show", action="store_true",
+                       help="Open image after capture (macOS)")
+    parser.add_argument("--json", action="store_true",
+                       help="Output JSON")
+    
+    args = parser.parse_args()
+    
+    # Status command
+    if args.command == "status":
+        status = check_status()
+        if args.json:
+            print(json.dumps(status, indent=2))
+        else:
+            icon = "✅" if status["connected"] else "❌"
+            print(f"{icon} Osmo Pocket 3: {'Connected' if status['connected'] else 'Not found'}")
+            print(f"   Host: {status['host']}")
+            if status["devices"]:
+                print("   Devices:")
+                for dev in status["devices"]:
+                    print(f"     {dev}")
+        sys.exit(0 if status["connected"] else 1)
+    
+    # Capture command
+    resolution = "4k" if args.four_k else ("720p" if args.seven_twenty else "1080p")
+    
+    if not args.json:
+        print(f"📸 Capturing {resolution}...", end=" ", flush=True)
+    
+    try:
+        path, error = capture(resolution, args.output)
+    except subprocess.TimeoutExpired:
+        error = "Timeout - Windows PC unreachable?"
+        path = None
+    except Exception as e:
+        error = str(e)
+        path = None
+    
+    if error:
+        if args.json:
+            print(json.dumps({"success": False, "error": error}))
+        else:
+            print(f"❌\n   Error: {error}")
+        sys.exit(1)
+    
+    # Success
+    file_size = os.path.getsize(path)
+    
+    if args.json:
+        print(json.dumps({
+            "success": True,
+            "path": path,
+            "resolution": resolution,
+            "size_bytes": file_size
+        }))
+    else:
+        print(f"✅")
+        print(f"   Saved: {path}")
+        print(f"   Size: {file_size // 1024} KB")
+    
+    # Open if requested
+    if args.show and not args.json:
+        subprocess.run(["open", path], check=False)
+
+
+if __name__ == "__main__":
+    main()
